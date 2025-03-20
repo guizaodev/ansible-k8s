@@ -1,0 +1,14 @@
+[control_plane]
+10.0.0.1
+
+[worker_node]
+10.0.0.2
+10.0.0.3
+
+[control_plane:vars]
+ansible_ssh_private_key_file=/home/user/.ssh/id_ed25519
+ansible_user=root
+
+[worker_node:vars]
+ansible_ssh_private_key_file=/home/user/.ssh/id_ed25519
+ansible_user=root

@@ -1,0 +1,191 @@
+---
+- name: Instalar e configurar o ContainerD
+  hosts: all
+  become: true
+  tasks:
+    - name: instalação dos módulos do Kernel Linux
+      ansible.builtin.copy:
+        src: ./k8s.conf
+        dest: /etc/modules-load.d/k8s.conf
+        mode: '0644'
+
+    - name: Adicionando o overlay
+      modprobe:
+        name: overlay
+        state: present
+    
+    - name: Adicionando o br_netfilter
+      modprobe:
+        name: br_netfilter
+        state: present
+
+    - name: Configurando o sysctl
+      ansible.builtin.copy:
+        src: ./k8s-cri.conf
+        dest: /etc/sysctl.d/k8s.conf
+        mode: '0644'
+    
+    - name: Aplicando as configurações do sysctl
+      ansible.builtin.command: sysctl --system
+
+    - name: Adicionando chave do repositório APT
+      ansible.builtin.apt_key:
+        url: https://download.docker.com/linux/ubuntu/gpg
+        state: present
+
+    - name: Adicionando repositório do ContainerD
+      ansible.builtin.apt_repository:
+        repo: deb [arch=amd64] https://download.docker.com/linux/ubuntu {{ ansible_distribution_release }} stable
+        state: present
+
+    # - name: Check available containerd versions
+    #   ansible.builtin.shell: apt-cache madison containerd.io
+    #   register: containerd_versions
+    #   changed_when: false
+      
+    # - name: Display available versions
+    #   debug:
+    #     var: containerd_versions.stdout    
+
+    - name: Instalando o ContainerD
+      apt:
+        name: containerd.io=1.7.25-1
+        update_cache: yes
+        state: present
+
+    - name: Criando diretório do ContainerD
+      ansible.builtin.file:
+        path: /etc/containerd
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+
+    - name: Criando o arquivo de configuração do ContainerD
+      ansible.builtin.shell: containerd config default > /etc/containerd/config.toml
+    
+    - name: Trocando o config do ContainerD
+      ansible.builtin.command: sed -i 's/SystemdCgroup = false/SystemdCgroup = true/g' /etc/containerd/config.toml
+
+    - name: Reiniciando o ContainerD
+      ansible.builtin.service:
+        name: containerd
+        state: restarted
+
+- name: Instalar e configurar Kubeadm, Kubelet e Kubectl
+  hosts: all
+  tasks:
+    - name: Instalando pacotes necessários
+      apt:
+        name: "{{ item }}"
+        state: present
+      with_items:
+        - apt-transport-https
+        - ca-certificates
+        - curl
+        - gpg
+    
+    - name: Adicionando chave do repositório APT
+      ansible.builtin.apt_key:
+        url: https://pkgs.k8s.io/core:/stable:/v1.32/deb/Release.key
+        state: present
+
+    - name: Adicionando repositório
+      ansible.builtin.apt_repository:
+        repo: deb https://pkgs.k8s.io/core:/stable:/v1.32/deb/ /
+        state: present
+
+    # - name: Check available kubectl versions
+    #   ansible.builtin.shell: apt-cache madison kubectl
+    #   register: kubectl_versions
+    #   changed_when: false
+      
+    # - name: Display available versions
+    #   debug:
+    #     var: kubectl_versions.stdout    
+
+    - name: Instalando Kubeadm, Kubelet e Kubectl
+      apt:
+        name: "{{ item }}"
+        state: present
+      with_items:
+        - kubelet=1.32.3-1.1
+        - kubeadm=1.32.3-1.1
+        - kubectl=1.32.3-1.1
+
+    - name: Hold Kubernetes packages
+      dpkg_selections:
+        name: "{{ item }}"
+        selection: hold
+      with_items:
+        - kubelet
+        - kubeadm
+        - kubectl
+
+- name: Inicio do Cluster K8S
+  hosts: control_plane
+  tasks:
+    - name: Limpando o ambiente
+      ansible.builtin.command: kubeadm reset -f
+      
+    - name: Desabilitando o swap
+      ansible.builtin.command: swapoff -a
+      ignore_errors: yes
+
+    - name: Desabilitar swap permanentemente
+      ansible.builtin.replace:
+        path: /etc/fstab
+        regexp: '^([^#].*\sswap\s+sw\s+.*)$'
+        replace: '# \1'
+      ignore_errors: yes
+
+    - name: Inicializando o Cluster
+      ansible.builtin.command: kubeadm init
+
+    - name: Criando o diretório .kube
+      ansible.builtin.file:
+        path: "~/.kube"
+        state: directory
+        owner: "{{ ansible_user }}"
+        group: "{{ ansible_user }}"
+        mode: '0755'
+    
+    - name: Copiando o arquivo de configuração
+      copy:
+        src: /etc/kubernetes/admin.conf
+        dest: ~/.kube/config
+        remote_src: yes
+        owner: "{{ ansible_user }}"
+        group: "{{ ansible_user }}"
+        mode: '0644'
+    
+    - name: Instalando o Pod Network [CALICO]
+      ansible.builtin.command: kubectl apply -f https://docs.projectcalico.org/manifests/calico.yaml
+
+    - name: Criando o comando para adicionar os nodes
+      ansible.builtin.command: kubeadm token create --print-join-command
+      register: join_command
+
+    - name: Adicionando o comando de join nos facts
+      set_fact:
+        k8s_join_command: "{{ join_command.stdout_lines[0] }}"
+
+- name: Adicionar os nodes ao Cluster
+  hosts: worker_node
+  tasks:
+    - name: Limpando o ambiente
+      ansible.builtin.command: kubeadm reset -f
+
+    - name: Desabilitando o swap
+      ansible.builtin.command: swapoff -a
+      ignore_errors: yes
+      
+    - name: Desabilitar swap permanentemente
+      ansible.builtin.replace:
+        path: /etc/fstab
+        regexp: '^([^#].*\sswap\s+sw\s+.*)$'
+        replace: '# \1'
+      ignore_errors: yes      
+
+    - name: Adicionando os Workers ao Cluster
+      ansible.builtin.command: "{{ hostvars[groups['control_plane'][0]].k8s_join_command }}"
