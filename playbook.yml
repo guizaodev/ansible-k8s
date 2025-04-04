@@ -189,3 +189,74 @@
 
     - name: Adicionando os Workers ao Cluster
       ansible.builtin.command: "{{ hostvars[groups['control_plane'][0]].k8s_join_command }}"
+
+- name: Install Helm on control plane
+  hosts: control_plane
+  become: true
+  tasks:
+    - name: Download Helm install script
+      get_url:
+        url: https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3
+        dest: /tmp/get_helm.sh
+        mode: '0700'
+        force: yes
+      
+    - name: Install Helm
+      shell: /tmp/get_helm.sh
+      args:
+        creates: /usr/local/bin/helm
+
+    - name: Add bitnami, ingress-nginx repositorys
+      command: "helm repo add {{ item.name }} {{ item.url }}"
+      with_items:
+        - { name: "bitnami", url: "https://charts.bitnami.com/bitnami" }
+        - { name: "ingress-nginx", url: "https://kubernetes.github.io/ingress-nginx" }
+      changed_when: false
+      
+    - name: Update Helm repositories
+      command: helm repo update
+      changed_when: false
+      
+    - name: Verify Helm version
+      command: helm version
+      register: helm_version
+      changed_when: false
+      
+    - name: Display Helm version
+      debug:
+        var: helm_version.stdout
+
+- name: Install NGINX Ingress Controller
+  hosts: control_plane
+  become: true
+  tasks:
+    - name: Install/Upgrade NGINX Ingress Controller
+      command: >
+        helm upgrade --install ingress-nginx ingress-nginx/ingress-nginx
+        --namespace ingress-nginx
+        --create-namespace
+        --set controller.kind=DaemonSet
+        --set controller.hostNetwork=true
+      register: nginx_ingress_install
+      changed_when: "'Release \"ingress-nginx\" does not exist' not in nginx_ingress_install.stdout"
+      
+    - name: Display NGINX Ingress Controller installation output
+      debug:
+        var: nginx_ingress_install.stdout_lines
+
+    - name: Wait for NGINX Ingress Controller DaemonSet to be ready
+      shell: |
+        until [ "$(kubectl get daemonset/ingress-nginx-controller -n ingress-nginx -o jsonpath='{.status.numberReady}')" = "$(kubectl get daemonset/ingress-nginx-controller -n ingress-nginx -o jsonpath='{.status.desiredNumberScheduled}')" ]; do
+          echo "Waiting for all replicas to be ready..."
+          sleep 5
+        done
+        echo "All pods are ready now!"
+      args:
+        executable: /bin/bash
+      register: nginx_wait
+      changed_when: false
+      timeout: 300 
+
+    - name: Display completion message
+      debug:
+        msg: "NGINX Ingress Controller instalado com sucesso com {{ nginx_wait.stdout_lines[-1] }}"
